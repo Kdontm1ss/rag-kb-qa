@@ -16,6 +16,9 @@ x-backend: &backend
     LLM_MODEL: ${LLM_MODEL:-qwen-plus}
     EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3.7-text-embedding}
     EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+    RERANK_MODEL: ${RERANK_MODEL:-qwen3-rerank}
+    RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+    RERANK_MIN_SCORE: ${RERANK_MIN_SCORE:-0.25}
   depends_on:
     postgres:
       condition: service_healthy

@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Generic, Literal, TypeVar
@@ -6,18 +7,31 @@ from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from redis.exceptions import RedisError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .chat import router as chat_router
 from .db import connect
-from .embedding import EmbeddingError, embed_texts, vector_parameter
+from .embedding import EmbeddingError
+from .retrieval import ChunkHit, retrieve_keywords, retrieve_vectors
+from .schema import ensure_lexical_schema
 from .storage import DOCUMENT_QUEUE, UPLOAD_DIR, queue_connection
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="RAG 知识库文档入库")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await run_in_threadpool(ensure_lexical_schema)
+    yield
+
+
+app = FastAPI(title="RAG 知识库问答", lifespan=lifespan)
+app.include_router(chat_router)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 FILE_TYPES = {"pdf", "docx", "md", "txt"}
@@ -27,10 +41,6 @@ DOCUMENT_FIELDS = """
            (SELECT count(*) FROM chunks WHERE document_id = COALESCE(d.duplicate_of, d.id)) AS chunk_count
     FROM documents AS d
 """
-CHUNK_FIELDS = """
-    c.id AS chunk_id, c.document_id, d.title, c.content, c.chunk_index, c.token_count, c.metadata
-"""
-
 DocumentStatus = Literal["processing", "ready", "failed", "needs_review"]
 T = TypeVar("T")
 
@@ -56,17 +66,6 @@ class DocumentInfo(BaseModel):
     error_message: str | None
     created_at: datetime
     chunk_count: int
-
-
-class ChunkHit(BaseModel):
-    chunk_id: int
-    document_id: UUID
-    title: str
-    content: str
-    chunk_index: int
-    token_count: int
-    metadata: dict
-    score: float | None
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -180,26 +179,9 @@ def search_chunks(
     if not query or "\x00" in query:
         raise HTTPException(422, "请输入有效的检索内容")
 
-    if mode == "vector":
-        try:
-            vector = embed_texts([query])[0]
-        except EmbeddingError as error:
-            raise HTTPException(503, str(error)) from error
-        sql = f"""
-            SELECT {CHUNK_FIELDS}, 1 - (c.embedding <=> %s::vector) AS score
-            FROM chunks c JOIN documents d ON d.id = c.document_id
-            WHERE d.status = 'ready' ORDER BY score DESC, c.id LIMIT %s
-        """
-        parameters = (vector_parameter(vector), limit)
-    else:
-        sql = f"""
-            SELECT {CHUNK_FIELDS}, NULL AS score
-            FROM chunks c JOIN documents d ON d.id = c.document_id
-            WHERE d.status = 'ready' AND strpos(lower(c.content), lower(%s)) > 0
-            ORDER BY c.id LIMIT %s
-        """
-        parameters = (query, limit)
-
-    with connect() as conn:
-        rows = conn.execute(sql, parameters).fetchall()
-    return ApiResponse(data=[ChunkHit.model_validate(row) for row in rows])
+    if mode == "keyword":
+        return ApiResponse(data=retrieve_keywords(query, limit))
+    try:
+        return ApiResponse(data=retrieve_vectors(query, limit))
+    except EmbeddingError as error:
+        raise HTTPException(503, str(error)) from error
