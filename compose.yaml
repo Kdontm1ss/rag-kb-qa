@@ -1,0 +1,68 @@
+x-backend: &backend
+  image: rag-kb-qa-backend
+  build: .
+  restart: unless-stopped
+  environment:
+    PGHOST: postgres
+    PGUSER: ${POSTGRES_USER:-rag}
+    PGPASSWORD: ${POSTGRES_PASSWORD:-rag-local-dev}
+    PGDATABASE: ${POSTGRES_DB:-rag}
+    REDIS_URL: redis://redis:6379/0
+    UPLOAD_DIR: /data/uploads
+    LLM_API_KEY: ${DASHSCOPE_API_KEY:-}
+    EMBEDDING_API_KEY: ${DASHSCOPE_API_KEY:-}
+    LLM_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    EMBEDDING_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3.7-text-embedding}
+    EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    - uploads:/data/uploads
+
+services:
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag-local-dev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
